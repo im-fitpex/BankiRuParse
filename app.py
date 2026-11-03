@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import json
 import os
+import glob
 from datetime import datetime, date
 import threading
 import queue
@@ -27,7 +28,6 @@ def parse_reviews_thread(parser, config, progress_queue):
     """Функция для парсинга отзывов в отдельном потоке"""
     try:
         progress_queue.put(("status", "Инициализация парсера..."))
-        
         reviews = parser.parse_reviews(
             start_page=config['start_page'],
             end_page=config['end_page'],
@@ -41,16 +41,50 @@ def parse_reviews_thread(parser, config, progress_queue):
             save_all_reviews=config['save_all_reviews'],
             antiban_mode=config['antiban_mode']
         )
-        
         progress_queue.put(("complete", reviews))
-        
     except Exception as e:
         progress_queue.put(("error", str(e)))
+
+def convert_json_to_csv(input_dir="out", output_filename="all_reviews.csv"):
+    """Конвертирует все JSON файлы из папки в один CSV файл"""
+    # Создаем папку, если её нет
+    os.makedirs(input_dir, exist_ok=True)
+    
+    json_files = glob.glob(os.path.join(input_dir, "*.json"))
+    if not json_files:
+        return None, "❌ Нет JSON файлов для конвертации. Сначала запустите парсинг."
+    
+    all_reviews = []
+    for file_path in json_files:
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    all_reviews.extend(data)
+        except Exception as e:
+            st.error(f"Ошибка чтения {file_path}: {e}")
+    
+    if not all_reviews:
+        return None, "❌ Не удалось извлечь данные из JSON файлов."
+        
+    df = pd.DataFrame(all_reviews)
+    
+    # Упорядочиваем колонки для удобства чтения
+    preferred_order = ['review_id', 'date', 'rating', 'title', 'text', 'url']
+    existing_cols = [col for col in preferred_order if col in df.columns]
+    other_cols = [col for col in df.columns if col not in preferred_order]
+    df = df[existing_cols + other_cols]
+    
+    output_path = os.path.join(input_dir, output_filename)
+    # utf-8-sig гарантирует корректное отображение кириллицы в Excel
+    df.to_csv(output_path, index=False, encoding='utf-8-sig')
+    
+    return output_path, f"✅ Успешно конвертировано {len(all_reviews)} отзывов в CSV!"
 
 def main():
     st.title("🏦 Парсер отзывов Банки.ру")
     st.subheader("Парсинг отзывов о Газпромбанке")
-    
+
     # Боковая панель с настройками
     with st.sidebar:
         st.header("⚙️ Настройки парсинга")
@@ -62,20 +96,19 @@ def main():
             start_page = st.number_input("Начальная страница", min_value=1, value=1, step=1)
         with col2:
             end_page = st.number_input("Конечная страница", min_value=1, value=5, step=1)
-        
+            
         if start_page > end_page:
             st.error("Начальная страница не может быть больше конечной!")
-        
+
         # Задержки между запросами
         st.subheader("⏱️ Тайминги")
         delay_min = st.slider("Минимальная задержка (сек)", 2.0, 20.0, 5.0, 0.5)
         delay_max = st.slider("Максимальная задержка (сек)", delay_min, 40.0, 12.0, 0.5)
         jitter = st.slider("Джиттер (сек)", 0.0, 8.0, 3.0, 0.1)
-        
+
         # Фильтрация по датам
         st.subheader("📅 Фильтр по датам")
         use_date_filter = st.checkbox("Включить фильтр по датам")
-        
         start_date_str = None
         end_date_str = None
         
@@ -88,7 +121,6 @@ def main():
                     help="Формат: DD.MM.YYYY"
                 )
                 start_date_str = start_date.strftime("%d.%m.%Y")
-            
             with col2:
                 end_date = st.date_input(
                     "Конечная дата",
@@ -96,26 +128,25 @@ def main():
                     help="Формат: DD.MM.YYYY"
                 )
                 end_date_str = end_date.strftime("%d.%m.%Y")
-            
+                
             if start_date > end_date:
                 st.error("Начальная дата не может быть больше конечной!")
-        
+
         # Настройки сохранения
         st.subheader("💾 Сохранение")
         save_every_pages = st.number_input(
-            "Сохранять каждые N страниц", 
-            min_value=1, 
-            value=5, 
+            "Сохранять каждые N страниц",
+            min_value=1,
+            value=5,
             step=1,
             help="Создавать отдельный файл каждые N страниц"
         )
-        
         save_all_reviews = st.checkbox(
             "Сохранять общий файл all_reviews",
             value=True,
             help="Создает один большой файл со всеми отзывами. Отключите для экономии места при больших объемах."
         )
-        
+
         # Настройки парсинга
         st.subheader("🔍 Качество парсинга")
         get_full_text = st.checkbox(
@@ -123,7 +154,7 @@ def main():
             value=True,
             help="Если включено, парсер будет переходить на страницу каждого отзыва для получения полного текста. Медленнее, но полнее."
         )
-        
+
         # Антибан настройки
         st.subheader("🛡️ Защита от блокировки")
         antiban_mode = st.checkbox(
@@ -135,17 +166,17 @@ def main():
         if antiban_mode:
             st.warning("⚠️ В антибан режиме парсинг будет в 2-3 раза медленнее, но значительно безопаснее")
             st.info("🛡️ Включает: ротацию User-Agent, увеличенные задержки, дополнительные заголовки")
-        
+            
         if get_full_text:
             if not antiban_mode:
                 st.warning("⚠️ Получение полных текстов ЗНАЧИТЕЛЬНО увеличивает время парсинга и нагрузку на сервер.")
             st.info("🕐 При включенной опции добавляется задержка 0.5-1.5 сек между каждым отзывом + основные задержки между страницами.")
             
-            estimated_time = (end_page - start_page + 1) * 25 * 1.0  # примерно 25 отзывов на странице * 1 сек задержки
-            if antiban_mode:
-                estimated_time *= 2.5  # увеличиваем оценку времени для антибан режима
-            st.info(f"⏱️ Примерное время парсинга: {estimated_time/60:.1f} минут для {end_page - start_page + 1} страниц")
-        
+        estimated_time = (end_page - start_page + 1) * 25 * 1.0 # примерно 25 отзывов на странице * 1 сек задержки
+        if antiban_mode:
+            estimated_time *= 2.5 # увеличиваем оценку времени для антибан режима
+        st.info(f"⏱️ Примерное время парсинга: {estimated_time/60:.1f} минут для {end_page - start_page + 1} страниц")
+
         st.markdown("---")
         
         # Информация о настройках
@@ -165,16 +196,15 @@ def main():
             st.markdown("- ⏱️ Увеличенные задержки")
             st.markdown("- 🔗 Реферер заголовки")
             st.markdown("- 🛡️ Защитные заголовки")
-    
+
     # Основная область
     col1, col2 = st.columns([3, 1])
     
     with col1:
         st.subheader("🚀 Управление парсингом")
-    
     with col2:
         if st.session_state.parsing_status == "idle":
-            if st.button("▶️ Начать парсинг", type="primary", use_container_width=True):
+            if st.button("▶️ Начать парсинг", type="primary", width="stretch"):
                 if start_page <= end_page and (not use_date_filter or start_date <= end_date):
                     # Подготовка конфигурации
                     config = {
@@ -194,25 +224,22 @@ def main():
                     # Запуск парсинга в отдельном потоке
                     st.session_state.parsing_status = "running"
                     parser = BankiRuParser()
-                    
                     thread = threading.Thread(
                         target=parse_reviews_thread,
                         args=(parser, config, st.session_state.progress_queue)
                     )
                     thread.daemon = True
                     thread.start()
-                    
                     st.rerun()
-        
+                    
         elif st.session_state.parsing_status == "running":
-            if st.button("⏸️ Остановить", type="secondary", use_container_width=True):
+            if st.button("⏸️ Остановить", type="secondary", width="stretch"):
                 st.session_state.parsing_status = "idle"
                 st.rerun()
-    
+
     # Область прогресса
     if st.session_state.parsing_status == "running":
         st.subheader("📈 Прогресс парсинга")
-        
         progress_container = st.container()
         status_container = st.container()
         
@@ -220,37 +247,32 @@ def main():
         try:
             while not st.session_state.progress_queue.empty():
                 message_type, data = st.session_state.progress_queue.get_nowait()
-                
                 if message_type == "status":
                     status_container.info(data)
-                
                 elif message_type == "complete":
                     st.session_state.parsed_reviews = data
                     st.session_state.parsing_status = "completed"
                     st.success(f"✅ Парсинг завершен! Найдено {len(data)} отзывов")
                     st.rerun()
-                
                 elif message_type == "error":
                     st.session_state.parsing_status = "error"
                     st.error(f"❌ Ошибка при парсинге: {data}")
                     st.rerun()
-        
         except queue.Empty:
             pass
-        
+            
         # Анимация загрузки
         with progress_container:
             st.write("🔄 Выполняется парсинг...")
-            st.progress(0.5)  # Неопределенный прогресс
-        
+            st.progress(0.5) # Неопределенный прогресс
+            
         # Автообновление каждые 2 секунды
         time.sleep(2)
         st.rerun()
-    
+
     # Отображение результатов
     if st.session_state.parsing_status == "completed" and st.session_state.parsed_reviews:
         st.subheader("📋 Результаты парсинга")
-        
         reviews = st.session_state.parsed_reviews
         
         # Статистика
@@ -269,22 +291,20 @@ def main():
         with col4:
             reviews_with_date = [r for r in reviews if r.get('date')]
             st.metric("С датой", len(reviews_with_date))
-        
+
         # Таблица отзывов
         if reviews:
             df = pd.DataFrame(reviews)
-            
             # Настройка отображения колонок
             columns_to_show = ['date', 'title', 'rating', 'review_id']
             available_columns = [col for col in columns_to_show if col in df.columns]
-            
             if available_columns:
                 st.dataframe(
                     df[available_columns],
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True
                 )
-            
+
             # Детальный просмотр отзыва
             st.subheader("🔍 Детальный просмотр")
             selected_idx = st.selectbox(
@@ -295,14 +315,12 @@ def main():
             
             if selected_idx is not None:
                 review = reviews[selected_idx]
-                
                 col1, col2 = st.columns([2, 1])
                 with col1:
                     st.write(f"**Заголовок:** {review.get('title', 'N/A')}")
                     st.write(f"**Дата:** {review.get('date', 'N/A')}")
                     st.write(f"**URL:** {review.get('url', 'N/A')}")
                     st.write(f"**ID отзыва:** {review.get('review_id', 'N/A')}")
-                
                 with col2:
                     rating = review.get('rating')
                     if rating:
@@ -313,50 +331,65 @@ def main():
                 if review.get('text'):
                     st.write("**Текст отзыва:**")
                     st.text_area("", review['text'], height=150, disabled=True)
-    
+
     # Файловый менеджер
     st.subheader("📁 Сохраненные файлы")
     
+    # --- БЛОК ЭКСПОРТА В CSV (ТЕПЕРЬ ВСЕГДА ВИДЕН) ---
+    st.markdown("---")
+    st.write("📊 **Экспорт данных**")
+    if st.button("🔄 Конвертировать все JSON в один CSV", width="stretch"):
+        with st.spinner("Конвертация файлов..."):
+            csv_path, message = convert_json_to_csv("out", "all_reviews.csv")
+            if csv_path and os.path.exists(csv_path):
+                st.success(message)
+                with open(csv_path, "r", encoding="utf-8-sig") as f:
+                    st.download_button(
+                        label="💾 Скачать all_reviews.csv",
+                        data=f,
+                        file_name="all_reviews.csv",
+                        mime="text/csv",
+                        width="stretch"
+                    )
+            else:
+                st.warning(message)
+    # ------------------------------------------------
+
     if os.path.exists("out"):
         files = [f for f in os.listdir("out") if f.endswith(".json")]
         if files:
             files.sort()
-            
             col1, col2 = st.columns([3, 1])
             with col1:
                 selected_file = st.selectbox("Выберите файл для просмотра:", files)
-            
             with col2:
-                if st.button("📥 Загрузить файл"):
+                if st.button("📥 Загрузить файл", width="stretch"):
                     file_path = os.path.join("out", selected_file)
                     with open(file_path, 'r', encoding='utf-8') as f:
                         file_data = f.read()
-                    
                     st.download_button(
                         label="💾 Скачать JSON",
                         data=file_data,
                         file_name=selected_file,
-                        mime="application/json"
+                        mime="application/json",
+                        width="stretch"
                     )
             
             if selected_file:
                 try:
                     with open(os.path.join("out", selected_file), 'r', encoding='utf-8') as f:
                         file_reviews = json.load(f)
-                    
                     st.write(f"**Файл:** {selected_file}")
                     st.write(f"**Количество отзывов:** {len(file_reviews)}")
-                    
                     if file_reviews:
                         df_file = pd.DataFrame(file_reviews)
-                        st.dataframe(df_file.head(10), use_container_width=True)
-                
+                        st.dataframe(df_file.head(10), width="stretch")
                 except Exception as e:
                     st.error(f"Ошибка при чтении файла: {e}")
         else:
-            st.info("📂 Нет сохраненных файлов")
+            st.info("📂 Папка 'out' пуста. Запустите парсинг, чтобы создать JSON файлы.")
     else:
-        st.info("📂 Папка 'out' не найдена")
+        st.info("📂 Папка 'out' не найдена. Она создастся после первого парсинга.")
 
 if __name__ == "__main__":
     main()
